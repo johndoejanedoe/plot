@@ -1,8 +1,9 @@
+# main.py
 import io
 import os
 import re
 import asyncio
-from typing import List, Tuple, Union
+from typing import List
 
 import numpy as np
 import matplotlib
@@ -12,7 +13,7 @@ import matplotlib.pyplot as plt
 import cv2
 import pytesseract
 import sympy as sp
-from sympy import Eq, symbols, lambdify
+from sympy import Eq, symbols
 from sympy.core.relational import Relational, Lt, Le, Gt, Ge
 from sympy.parsing.sympy_parser import (
     parse_expr,
@@ -27,11 +28,13 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# Load .env locally if present
+# ----- ENV / Discord setup -----
 load_dotenv()
-
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-if not TOKEN:
+
+if TOKEN:
+    print(f"[INFO] Token detected (length {len(TOKEN)})")
+else:
     print("[WARN] DISCORD_BOT_TOKEN not set. Set it in Railway Variables.")
 
 INTENTS = discord.Intents.default()
@@ -43,13 +46,16 @@ TRANSFORMS = (
     + (implicit_multiplication_application, convert_xor, function_exponentiation)
 )
 
+# ----- Parsing helpers -----
 def _normalize_text(s: str) -> str:
     s = s.strip()
     s = s.replace("≤", "<=").replace("≥", ">=").replace("^", "**")
+    s = s.replace("—", "-").replace("–", "-")
+    s = re.sub(r"\s+", " ", s)
     return s
 
 def _split_items(text: str) -> List[str]:
-    return [i.strip() for i in re.split(r"[;\n]|,| and ", text) if i.strip()]
+    return [i.strip() for i in re.split(r"[;\n]|,|\band\b|\bAND\b", text) if i.strip()]
 
 def _ensure_eq(expr_str: str):
     s = _normalize_text(expr_str)
@@ -75,6 +81,7 @@ def _relation_to_function(rel):
     else:
         return sp.simplify(rel), "="
 
+# ----- Plotting -----
 def _make_grid(xmin, xmax, ymin, ymax, n=400):
     xx = np.linspace(xmin, xmax, n)
     yy = np.linspace(ymin, ymax, n)
@@ -87,74 +94,115 @@ def _plot_items(items, xlim, ylim):
     fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
     ax.set_xlim([xmin, xmax])
     ax.set_ylim([ymin, ymax])
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
     ax.grid(True, alpha=0.3)
 
-    has_any = False
+    has_any_ineq = False
     mask_all = np.ones_like(Xg, dtype=bool)
 
     for rel in items:
         F, op = _relation_to_function(rel)
         Fxy = sp.lambdify((x, y), F, "numpy")
-        Z = Fxy(Xg, Yg)
+        with np.errstate(all="ignore"):
+            Z = Fxy(Xg, Yg)
 
-        ax.contour(Xg, Yg, Z, levels=[0], colors="k", linewidths=1)
+        # boundary curve F=0
+        try:
+            ax.contour(Xg, Yg, Z, levels=[0], linewidths=1.2)
+        except Exception:
+            pass
 
+        # shade inequality intersection
         if op in {"<=", "<", ">=", ">"}:
-            has_any = True
+            has_any_ineq = True
             if op in {"<=", "<"}:
-                mask = Z <= 0
+                mask = Z <= 0 if op == "<=" else Z < 0
             else:
-                mask = Z >= 0
-            mask_all &= mask
+                mask = Z >= 0 if op == ">=" else Z > 0
+            mask_all &= np.nan_to_num(mask, nan=False)
 
-    if has_any:
-        ax.imshow(np.flipud(mask_all), extent=[xmin, xmax, ymin, ymax],
-                  alpha=0.25, cmap="Greys", origin="lower")
+    if has_any_ineq:
+        ax.imshow(
+            np.flipud(mask_all),
+            extent=[xmin, xmax, ymin, ymax],
+            origin="lower",
+            alpha=0.25,
+            cmap="Greys",
+            interpolation="nearest",
+            aspect="auto",
+        )
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png")
+    plt.tight_layout()
+    plt.savefig(buf, format="png", bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
+# ----- OCR -----
 def ocr_image_to_text(img_bytes: bytes) -> str:
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return ""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     text = pytesseract.image_to_string(gray)
-    return text.strip()
+    return _normalize_text(text.strip())
 
+# ----- Async wrappers -----
 async def _graph_from_text(input_text, x_min, x_max, y_min, y_max):
     exprs = parse_input_to_sympy_list(input_text)
     return await asyncio.to_thread(_plot_items, exprs, (x_min, x_max), (y_min, y_max))
 
+# ----- Discord events & commands -----
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+    try:
+        await bot.tree.sync()
+        print(f"Logged in as {bot.user}")
+    except Exception as e:
+        print("[SYNC ERROR]", e)
 
 @bot.tree.command(name="graph", description="Plot equations/inequalities")
-async def graph(interaction: discord.Interaction, input: str, 
-                x_min: float=-10, x_max: float=10, y_min: float=-10, y_max: float=10):
-    await interaction.response.defer()
+async def graph(
+    interaction: discord.Interaction,
+    input: str,
+    x_min: float = -10.0,
+    x_max: float = 10.0,
+    y_min: float = -10.0,
+    y_max: float = 10.0,
+):
+    await interaction.response.defer(thinking=True)
     try:
         png = await _graph_from_text(input, x_min, x_max, y_min, y_max)
         await interaction.followup.send(file=discord.File(io.BytesIO(png), "graph.png"))
     except Exception as e:
-        await interaction.followup.send(f"Error: {e}")
+        await interaction.followup.send(f"❌ Error: {e}")
 
 @bot.tree.command(name="imagegraph", description="OCR an image and plot")
-async def imagegraph(interaction: discord.Interaction, image: discord.Attachment,
-                     x_min: float=-10, x_max: float=10, y_min: float=-10, y_max: float=10):
-    await interaction.response.defer()
+async def imagegraph(
+    interaction: discord.Interaction,
+    image: discord.Attachment,
+    x_min: float = -10.0,
+    x_max: float = 10.0,
+    y_min: float = -10.0,
+    y_max: float = 10.0,
+):
+    await interaction.response.defer(thinking=True)
     try:
         img_bytes = await image.read()
         text = await asyncio.to_thread(ocr_image_to_text, img_bytes)
+        if not text:
+            await interaction.followup.send("⚠️ Couldn't read any text from the image.")
+            return
         png = await _graph_from_text(text, x_min, x_max, y_min, y_max)
-        await interaction.followup.send(content=f"Detected: `{text}`",
-                                        file=discord.File(io.BytesIO(png), "graph.png"))
+        await interaction.followup.send(
+            content=f"**Detected:** `{text}`",
+            file=discord.File(io.BytesIO(png), "graph.png"),
+        )
     except Exception as e:
-        await interaction.followup.send(f"Error: {e}")
+        await interaction.followup.send(f"❌ Error: {e}")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
