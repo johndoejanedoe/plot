@@ -1,4 +1,3 @@
-# main.py
 import io
 import os
 import re
@@ -28,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# ----- ENV / Discord setup -----
+# ------------------ ENV / TOKEN ------------------
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 
@@ -46,7 +45,7 @@ TRANSFORMS = (
     + (implicit_multiplication_application, convert_xor, function_exponentiation)
 )
 
-# ----- Parsing helpers -----
+# ------------------ HELPERS ------------------
 def _normalize_text(s: str) -> str:
     s = s.strip()
     s = s.replace("≤", "<=").replace("≥", ">=").replace("^", "**")
@@ -81,7 +80,7 @@ def _relation_to_function(rel):
     else:
         return sp.simplify(rel), "="
 
-# ----- Plotting -----
+# ------------------ PLOTTING ------------------
 def _make_grid(xmin, xmax, ymin, ymax, n=400):
     xx = np.linspace(xmin, xmax, n)
     yy = np.linspace(ymin, ymax, n)
@@ -140,7 +139,7 @@ def _plot_items(items, xlim, ylim):
     buf.seek(0)
     return buf.read()
 
-# ----- OCR -----
+# ------------------ OCR ------------------
 def ocr_image_to_text(img_bytes: bytes) -> str:
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -150,12 +149,11 @@ def ocr_image_to_text(img_bytes: bytes) -> str:
     text = pytesseract.image_to_string(gray)
     return _normalize_text(text.strip())
 
-# ----- Async wrappers -----
+# ------------------ DISCORD ------------------
 async def _graph_from_text(input_text, x_min, x_max, y_min, y_max):
     exprs = parse_input_to_sympy_list(input_text)
     return await asyncio.to_thread(_plot_items, exprs, (x_min, x_max), (y_min, y_max))
 
-# ----- Discord events & commands -----
 @bot.event
 async def on_ready():
     try:
