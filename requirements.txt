@@ -1,0 +1,8 @@
+discord.py
+sympy
+matplotlib
+numpy
+pillow
+pytesseract
+opencv-python-headless
+python-dotenv
